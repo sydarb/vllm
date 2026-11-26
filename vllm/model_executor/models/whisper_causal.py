@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-import logging
 import math
 from dataclasses import replace
 from fractions import Fraction
 from functools import partial
-from typing import ClassVar, Protocol
+from typing import ClassVar, Protocol, cast
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -24,6 +25,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.mistral import MistralMLP
 from vllm.model_executor.models.whisper import WhisperPosEmbedType
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -51,9 +53,49 @@ try:
 except ImportError:
     pass
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 CausalRMSNorm = partial(RMSNorm, eps=1e-5)
+
+_BLOCK_POOLING_BACKENDS = tuple(
+    b
+    for b in (
+        AiterFlashAttentionBackend,
+        CPUAttentionBackend,
+        FlashAttentionBackend,
+        RocmAttentionBackend,
+        TritonAttentionBackend,
+    )
+    if b is not None
+)
+
+
+def select_block_pooling_backend(
+    backend: type[AttentionBackend], kv_cache_dtype: str, is_cuda: bool
+) -> type[AttentionBackend]:
+    """Return a backend the block-pooling wrapper can wrap.
+
+    The selector may pick a backend the wrapper does not support, e.g.
+    FlashInfer for an FP8 KV cache on GPUs without FA3. On CUDA, fall back to
+    Triton for these layers only; the other layers keep the selected backend.
+    """
+    if issubclass(backend, _BLOCK_POOLING_BACKENDS):
+        return backend
+    if is_cuda and TritonAttentionBackend.supports_kv_cache_dtype(
+        cast(CacheDType, kv_cache_dtype)
+    ):
+        logger.info_once(
+            "%s does not support Whisper causal attention with block pooling; "
+            "using %s for those layers instead (kv_cache_dtype=%s).",
+            backend.get_name(),
+            TritonAttentionBackend.get_name(),
+            kv_cache_dtype,
+        )
+        return TritonAttentionBackend
+    raise NotImplementedError(
+        f"{backend} is not yet supported. "
+        "Contributions to support more backends are much appreciated."
+    )
 
 
 class _BlockPoolingAttentionMetadata(Protocol):
@@ -299,25 +341,6 @@ def create_whisper_attention_backend_with_block_pooling(
                 output_block_scale,
             )
 
-    _SUPPORTED_BACKENDS = tuple(
-        b
-        for b in (
-            AiterFlashAttentionBackend,
-            CPUAttentionBackend,
-            FlashAttentionBackend,
-            RocmAttentionBackend,
-            TritonAttentionBackend,
-        )
-        if b is not None
-    )
-
-    if not issubclass(underlying_attn_backend, _SUPPORTED_BACKENDS):
-        raise NotImplementedError(
-            f"{underlying_attn_backend} is not yet supported."
-            "Contributions to support more backends are much "
-            "appreciated."
-        )
-
     if not issubclass(
         underlying_attn_backend, (CPUAttentionBackend, FlashAttentionBackend)
     ):
@@ -379,6 +402,9 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             dtype,
             kv_cache_dtype,
             attn_type=attn_type,
+        )
+        underlying_attn_backend = select_block_pooling_backend(
+            underlying_attn_backend, kv_cache_dtype, current_platform.is_cuda()
         )
         attn_backend = create_whisper_attention_backend_with_block_pooling(
             underlying_attn_backend, block_pool_size

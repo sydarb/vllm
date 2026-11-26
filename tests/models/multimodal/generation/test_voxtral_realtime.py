@@ -68,7 +68,7 @@ def _normalize(texts: list[str]) -> list[str]:
     return texts
 
 
-def assert_encoder_kv_cache_spec(engine: LLM) -> None:
+def assert_encoder_kv_cache_spec(engine: LLM, kv_cache_dtype: str = "auto") -> None:
     vllm_config = engine.llm_engine.vllm_config
     audio_config = vllm_config.model_config.hf_config.audio_config
     layer_configs_per_rank = (
@@ -89,6 +89,8 @@ def assert_encoder_kv_cache_spec(engine: LLM) -> None:
     assert spec.block_size == 16
     assert spec.num_kv_heads == 32
     assert spec.tokens_per_state == Fraction(1, 4)
+    if kv_cache_dtype == "fp8":
+        assert spec.dtype.itemsize == 1, spec.dtype
     # cdiv(750, 4) == 188 pooled tokens cover the model's window; the extra
     # +1 is an eviction margin (see whisper_causal.py get_kv_cache_config).
     assert manager_config.params.sliding_window == cdiv(750, 4) + 1 == 189
@@ -182,14 +184,28 @@ def _assert_expected_text(outputs) -> None:
         )
 
 
-def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypatch):
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    [
+        "auto",
+        pytest.param(
+            "fp8",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="FP8 KV cache requires CUDA"
+            ),
+        ),
+    ],
+)
+def test_voxtral_realtime_forward(
+    audio_assets, tokenizer, vllm_runner, monkeypatch, kv_cache_dtype
+):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    vllm_kwargs = {**ENGINE_CONFIG}
+    vllm_kwargs = {**ENGINE_CONFIG, "kv_cache_dtype": kv_cache_dtype}
     vllm_kwargs["model_name"] = vllm_kwargs.pop("model")
 
     with vllm_runner(**vllm_kwargs) as vllm_model:
-        assert_encoder_kv_cache_spec(vllm_model.llm)
+        assert_encoder_kv_cache_spec(vllm_model.llm, kv_cache_dtype)
         inputs, sampling_params = _build_inputs(audio_assets, tokenizer)
 
         outputs = vllm_model.llm.generate(inputs, sampling_params=sampling_params)
