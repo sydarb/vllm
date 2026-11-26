@@ -571,6 +571,12 @@ class VoxtralForConditionalGeneration(
         Right now this is specific for compressed-tensors format and
         load_format mistral.
         """
+        # Voxtral and Voxtral Realtime encoder prefixes.
+        encoder = r"(?:mm_whisper_embeddings|mm_streams_embeddings\.embedding_module)"
+        rt_encoder_layers = (
+            r"mm_streams_embeddings\.embedding_module\.whisper_encoder"
+            r"\.transformer\.layers\.(\d+)"
+        )
         remapping_rules = [
             (r"output", r"language_model.lm_head"),
             (
@@ -594,16 +600,33 @@ class VoxtralForConditionalGeneration(
                 r"language_model.model.layers.\1.mlp.up_proj",
             ),
             (
-                r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.w(.*)",
+                r"layers\.(\d+)\.ada_rms_norm_t_cond\.([02])",
+                r"language_model.model.layers.\1.ada_rms_norm_t_cond.\2",
+            ),
+            (
+                rf"{encoder}\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.w(.*)",
                 r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.\2_proj",
             ),
             (
-                r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.wo",
+                rf"{encoder}\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.wo",
                 r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.out_proj",
             ),
             (
                 r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.feed_forward.w(\d+)",
                 r"whisper_encoder.whisper_encoder.layers.\1.layers.mlp.fc\2",
+            ),
+            # The realtime causal encoder uses a gated MLP.
+            (
+                rf"{rt_encoder_layers}\.feed_forward\.w1",
+                r"whisper_encoder.whisper_encoder.layers.\1.layers.mlp.gate_proj",
+            ),
+            (
+                rf"{rt_encoder_layers}\.feed_forward\.w2",
+                r"whisper_encoder.whisper_encoder.layers.\1.layers.mlp.down_proj",
+            ),
+            (
+                rf"{rt_encoder_layers}\.feed_forward\.w3",
+                r"whisper_encoder.whisper_encoder.layers.\1.layers.mlp.up_proj",
             ),
             (
                 r"mm_whisper_embeddings\.whisper_encoder\.conv_layers\.0",
@@ -614,11 +637,11 @@ class VoxtralForConditionalGeneration(
                 r"whisper_encoder.whisper_encoder.conv2",
             ),
             (
-                r"mm_whisper_embeddings\.audio_language_projection\.0",
+                rf"{encoder}\.audio_language_projection\.0",
                 r"audio_language_adapter.w_in",
             ),
             (
-                r"mm_whisper_embeddings\.audio_language_projection\.2",
+                rf"{encoder}\.audio_language_projection\.2",
                 r"audio_language_adapter.w_out",
             ),
         ]

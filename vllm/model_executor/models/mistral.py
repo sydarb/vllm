@@ -159,12 +159,15 @@ class MistralDecoderLayer(LlamaDecoderLayer):
         config = config or vllm_config.model_config.hf_config
 
         if getattr(config, "ada_rms_norm_t_cond", False):
+            quant_config = self.get_quant_config(vllm_config)
             self.ada_rms_norm_t_cond = nn.Sequential(
                 ColumnParallelLinear(
                     input_size=config.hidden_size,
                     output_size=config.ada_rms_norm_t_cond_dim,
                     bias=False,
                     return_bias=False,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.ada_rms_norm_t_cond.0",
                 ),
                 nn.GELU(),
                 RowParallelLinear(
@@ -172,6 +175,8 @@ class MistralDecoderLayer(LlamaDecoderLayer):
                     output_size=config.hidden_size,
                     bias=False,
                     return_bias=False,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.ada_rms_norm_t_cond.2",
                 ),
             )
         else:
